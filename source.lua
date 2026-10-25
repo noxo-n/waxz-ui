@@ -2,8 +2,8 @@
 --// ModuleScript -> put it in ReplicatedStorage and name it "PinkUI"
 --//
 --// Features: tween drag, corner resize, RShift toggle, blur + snow backdrop, two-column tabs,
---// toggles, sliders, buttons, dropdowns (single / multi), HSV color picker, gradient picker,
---// keybinds, textboxes, labels, notifications, live accent theming, unload.
+--// toggles, sliders, buttons, dropdowns (single / multi), HSV + hex color picker, gradient picker,
+--// keybinds, textboxes, labels, notifications, FULL live theming (presets + per-color pickers), unload.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,14 +16,76 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 ----------------------------------------------------------------
+-- THEMES
+----------------------------------------------------------------
+local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
+
+local DEFAULT_THEME = {
+	Accent = rgb(255, 140, 190),        -- gradient start (pink)
+	Accent2 = rgb(255, 255, 255),       -- gradient end (white)
+	Background = rgb(8, 8, 10),         -- window gradient start
+	BackgroundEnd = rgb(78, 30, 56),    -- window gradient end
+	Panel = rgb(20, 17, 21),            -- group boxes
+	Field = rgb(28, 24, 28),            -- buttons, sliders, textboxes, dropdowns
+	Outline = rgb(80, 62, 74),          -- borders
+	Text = rgb(228, 222, 226),          -- main text
+	Muted = rgb(160, 150, 158),         -- secondary text
+	Highlight = rgb(255, 182, 213),     -- slider values, keybind text
+}
+
+local function copyTable(t)
+	local c = {}
+	for k, v in pairs(t) do c[k] = v end
+	return c
+end
+
+local PRESETS = {
+	Pink = copyTable(DEFAULT_THEME),
+	Ocean = {
+		Accent = rgb(90, 170, 255), Accent2 = rgb(255, 255, 255),
+		Background = rgb(6, 8, 12), BackgroundEnd = rgb(20, 40, 78),
+		Panel = rgb(15, 19, 26), Field = rgb(22, 27, 36), Outline = rgb(60, 75, 95),
+		Text = rgb(225, 230, 238), Muted = rgb(150, 160, 175), Highlight = rgb(170, 210, 255),
+	},
+	Mint = {
+		Accent = rgb(110, 240, 180), Accent2 = rgb(255, 255, 255),
+		Background = rgb(6, 10, 8), BackgroundEnd = rgb(20, 70, 50),
+		Panel = rgb(15, 22, 19), Field = rgb(22, 31, 27), Outline = rgb(60, 90, 78),
+		Text = rgb(225, 238, 230), Muted = rgb(150, 170, 160), Highlight = rgb(180, 255, 220),
+	},
+	Violet = {
+		Accent = rgb(170, 120, 255), Accent2 = rgb(255, 200, 240),
+		Background = rgb(9, 7, 12), BackgroundEnd = rgb(50, 25, 90),
+		Panel = rgb(20, 16, 26), Field = rgb(28, 23, 36), Outline = rgb(80, 65, 100),
+		Text = rgb(232, 225, 240), Muted = rgb(160, 150, 172), Highlight = rgb(210, 190, 255),
+	},
+	Crimson = {
+		Accent = rgb(255, 80, 100), Accent2 = rgb(255, 200, 200),
+		Background = rgb(10, 6, 7), BackgroundEnd = rgb(90, 20, 30),
+		Panel = rgb(22, 15, 16), Field = rgb(31, 22, 23), Outline = rgb(95, 55, 60),
+		Text = rgb(240, 225, 226), Muted = rgb(170, 150, 152), Highlight = rgb(255, 170, 180),
+	},
+	Mono = {
+		Accent = rgb(255, 255, 255), Accent2 = rgb(150, 150, 150),
+		Background = rgb(8, 8, 8), BackgroundEnd = rgb(50, 50, 52),
+		Panel = rgb(18, 18, 18), Field = rgb(26, 26, 26), Outline = rgb(70, 70, 72),
+		Text = rgb(235, 235, 235), Muted = rgb(150, 150, 150), Highlight = rgb(220, 220, 220),
+	},
+}
+
+local THEME_KEYS = {
+	"Accent", "Accent2", "Background", "BackgroundEnd",
+	"Panel", "Field", "Outline", "Text", "Muted", "Highlight",
+}
+
+----------------------------------------------------------------
 -- STATE
 ----------------------------------------------------------------
 local Library = {
 	Options = {},                 -- Library.Options["Id"].Value
-	Theme = {
-		Accent = Color3.fromRGB(255, 140, 190),   -- pink
-		Accent2 = Color3.fromRGB(255, 255, 255),  -- white
-	},
+	Theme = copyTable(DEFAULT_THEME),
+	Defaults = DEFAULT_THEME,
+	Presets = PRESETS,            -- add your own: Library.Presets.MyTheme = { ... }
 	Open = false,
 	Snow = true,
 	Blur = true,
@@ -38,12 +100,6 @@ local Library = {
 
 local WHITE = Color3.fromRGB(255, 255, 255)
 local BLACK = Color3.fromRGB(0, 0, 0)
-local LIGHT_PINK = Color3.fromRGB(255, 182, 213)
-local PANEL = Color3.fromRGB(20, 17, 21)
-local FIELD = Color3.fromRGB(28, 24, 28)
-local OUTLINE = Color3.fromRGB(80, 62, 74)
-local MUTED = Color3.fromRGB(160, 150, 158)
-local TEXT = Color3.fromRGB(228, 222, 226)
 local FONT = Enum.Font.Code
 local LEFT, RIGHT = Enum.TextXAlignment.Left, Enum.TextXAlignment.Right
 
@@ -92,22 +148,35 @@ local function measure(text, width)
 	return ok and v or Vector2.new(width, 14)
 end
 
--- themed gradients (Accent -> Accent2). They all update when Library:SetTheme is called.
+-- bound properties: re-applied whenever the theme changes.
+-- getter is either a theme key ("Panel") or a function returning a Color3.
+local bound = {}
+local function bind(inst, prop, getter)
+	if type(getter) == "string" then
+		local key = getter
+		getter = function() return Library.Theme[key] end
+	end
+	inst[prop] = getter()
+	table.insert(bound, { inst, prop, getter })
+	return inst
+end
+
+-- themed gradients
 local themed = {}
 local function kp(t, c) return ColorSequenceKeypoint.new(t, c) end
 
 local function themeSeq(kind)
-	local a, b = Library.Theme.Accent, Library.Theme.Accent2
+	local th = Library.Theme
 	if kind == "loop" then
-		return ColorSequence.new({ kp(0, a), kp(0.5, b), kp(1, a) })
+		return ColorSequence.new({ kp(0, th.Accent), kp(0.5, th.Accent2), kp(1, th.Accent) })
 	elseif kind == "bg" then
 		return ColorSequence.new({
-			kp(0, Color3.fromRGB(8, 8, 10)),
-			kp(0.6, Color3.fromRGB(22, 12, 18)),
-			kp(1, a:Lerp(BLACK, 0.7)),
+			kp(0, th.Background),
+			kp(0.6, th.Background:Lerp(th.BackgroundEnd, 0.3)),
+			kp(1, th.BackgroundEnd),
 		})
 	end
-	return ColorSequence.new(a, b)
+	return ColorSequence.new(th.Accent, th.Accent2)
 end
 
 local function themedGradient(parent, kind, rotation)
@@ -116,15 +185,54 @@ local function themedGradient(parent, kind, rotation)
 	return g
 end
 
+local function textLabel(parent, props, colorKey)
+	local p = { BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextXAlignment = LEFT }
+	for k, v in pairs(props) do p[k] = v end
+	local l = new("TextLabel", p, parent)
+	if colorKey ~= false then bind(l, "TextColor3", colorKey or "Text") end
+	return l
+end
+
+local function outline(parent, thickness, transparency)
+	local s = new("UIStroke", { Thickness = thickness or 1, Transparency = transparency or 0 }, parent)
+	bind(s, "Color", "Outline")
+	return s
+end
+
 function Library:SetTheme(theme)
+	if type(theme) == "string" then theme = self.Presets[theme] end
+	if type(theme) ~= "table" then return end
 	for k, v in pairs(theme) do
 		self.Theme[k] = v
 	end
-	for _, entry in ipairs(themed) do
-		if entry[1].Parent then
-			entry[1].Color = themeSeq(entry[2])
+	for i = #bound, 1, -1 do
+		local e = bound[i]
+		if e[1]:IsDescendantOf(game) then
+			e[1][e[2]] = e[3]()
+		else
+			table.remove(bound, i)
 		end
 	end
+	for i = #themed, 1, -1 do
+		local e = themed[i]
+		if e[1]:IsDescendantOf(game) then
+			e[1].Color = themeSeq(e[2])
+		else
+			table.remove(themed, i)
+		end
+	end
+end
+
+-- returns a table you can paste into CreateWindow({ Theme = ... })
+function Library:ExportTheme()
+	local lines = { "Theme = {" }
+	for _, key in ipairs(THEME_KEYS) do
+		local c = self.Theme[key]
+		table.insert(lines, string.format("\t%s = Color3.fromRGB(%d, %d, %d),", key,
+			math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5)))
+	end
+	table.insert(lines, "},")
+	return table.concat(lines, "\n")
 end
 
 function Library:OnUnload(fn)
@@ -165,19 +273,16 @@ Group.__index = Group
 
 function Group:AddLabel(text, opts)
 	opts = opts or {}
-	local lbl = new("TextLabel", {
+	local lbl = textLabel(self.Container, {
 		Size = UDim2.new(1, 0, 0, 14),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
 		Text = text,
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = opts.Color or MUTED,
 		TextWrapped = true,
-		TextXAlignment = LEFT,
 		TextYAlignment = Enum.TextYAlignment.Top,
 		LayoutOrder = nextOrder(self),
-	}, self.Container)
+	}, opts.Color and false or "Muted")
+	if opts.Color then lbl.TextColor3 = opts.Color end
+
 	local o = { Instance = lbl }
 	function o:SetText(t) lbl.Text = t end
 	return o
@@ -209,10 +314,10 @@ function Group:AddToggle(id, opts)
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 0, 0.5, 0),
 		Size = UDim2.fromOffset(14, 14),
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 	}, row)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, box)
+	bind(box, "BackgroundColor3", "Field")
+	outline(box)
 	local fill = new("Frame", {
 		Position = UDim2.fromOffset(2, 2),
 		Size = UDim2.new(1, -4, 1, -4),
@@ -221,17 +326,12 @@ function Group:AddToggle(id, opts)
 		BorderSizePixel = 0,
 	}, box)
 	themedGradient(fill, "pair", 45)
-	local label = new("TextLabel", {
+	local label = textLabel(row, {
 		Position = UDim2.fromOffset(22, 0),
 		Size = UDim2.new(1, -22, 1, 0),
-		BackgroundTransparency = 1,
 		Text = opts.Text or "Toggle",
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, row)
+	})
 
 	function o:Set(v, silent)
 		v = v and true or false
@@ -260,34 +360,25 @@ function Group:AddSlider(id, opts)
 		BackgroundTransparency = 1,
 		LayoutOrder = nextOrder(self),
 	}, self.Container)
-	new("TextLabel", {
+	textLabel(holder, {
 		Size = UDim2.new(1, -50, 0, 14),
-		BackgroundTransparency = 1,
 		Text = opts.Text or "Slider",
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, holder)
-	local valueLabel = new("TextLabel", {
+	})
+	local valueLabel = textLabel(holder, {
 		Size = UDim2.new(1, 0, 0, 14),
-		BackgroundTransparency = 1,
 		Text = tostring(o.Value) .. suffix,
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = LIGHT_PINK,
 		TextXAlignment = RIGHT,
-	}, holder)
+	}, "Highlight")
 	local bar = new("TextButton", {
 		Position = UDim2.fromOffset(0, 19),
 		Size = UDim2.new(1, 0, 0, 10),
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 		Text = "",
 		AutoButtonColor = false,
 	}, holder)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, bar)
+	bind(bar, "BackgroundColor3", "Field")
+	outline(bar)
 	local fill = new("Frame", {
 		Size = UDim2.fromScale((o.Value - min) / (max - min), 1),
 		BackgroundColor3 = WHITE,
@@ -328,18 +419,22 @@ end
 
 function Group:AddButton(opts)
 	opts = opts or {}
+	local hovered = false
 	local btn = new("TextButton", {
 		Size = UDim2.new(1, 0, 0, 22),
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 		Text = opts.Text or "Button",
 		Font = FONT,
 		TextSize = 13,
-		TextColor3 = TEXT,
 		AutoButtonColor = false,
 		LayoutOrder = nextOrder(self),
 	}, self.Container)
-	local stroke = new("UIStroke", { Color = OUTLINE, Thickness = 1 }, btn)
+	bind(btn, "BackgroundColor3", "Field")
+	bind(btn, "TextColor3", "Text")
+	local stroke = new("UIStroke", { Thickness = 1 }, btn)
+	bind(stroke, "Color", function()
+		return hovered and Library.Theme.Accent or Library.Theme.Outline
+	end)
 	local flash = new("Frame", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = WHITE,
@@ -350,10 +445,12 @@ function Group:AddButton(opts)
 	themedGradient(flash, "pair", 45)
 
 	btn.MouseEnter:Connect(function()
+		hovered = true
 		tween(stroke, 0.15, { Color = Library.Theme.Accent })
 	end)
 	btn.MouseLeave:Connect(function()
-		tween(stroke, 0.15, { Color = OUTLINE })
+		hovered = false
+		tween(stroke, 0.15, { Color = Library.Theme.Outline })
 	end)
 	btn.MouseButton1Click:Connect(function()
 		flash.BackgroundTransparency = 0.55
@@ -392,58 +489,46 @@ function Group:AddDropdown(id, opts)
 	new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
 
 	if opts.Text then
-		new("TextLabel", {
+		textLabel(holder, {
 			Size = UDim2.new(1, 0, 0, 14),
-			BackgroundTransparency = 1,
 			Text = opts.Text,
-			Font = FONT,
-			TextSize = 13,
-			TextColor3 = TEXT,
-			TextXAlignment = LEFT,
 			LayoutOrder = 1,
-		}, holder)
+		})
 	end
 
 	local header = new("TextButton", {
 		Size = UDim2.new(1, 0, 0, 20),
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 		Text = "",
 		AutoButtonColor = false,
 		LayoutOrder = 2,
 	}, holder)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, header)
-	local headerText = new("TextLabel", {
+	bind(header, "BackgroundColor3", "Field")
+	outline(header)
+	local headerText = textLabel(header, {
 		Position = UDim2.fromOffset(6, 0),
 		Size = UDim2.new(1, -24, 1, 0),
-		BackgroundTransparency = 1,
 		Text = "",
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, header)
-	local arrow = new("TextLabel", {
+	})
+	local arrow = textLabel(header, {
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -6, 0, 0),
 		Size = UDim2.fromOffset(10, 20),
-		BackgroundTransparency = 1,
 		Text = "v",
-		Font = FONT,
 		TextSize = 12,
-		TextColor3 = MUTED,
-	}, header)
+		TextXAlignment = Enum.TextXAlignment.Center,
+	}, "Muted")
 
 	local list = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 		Visible = false,
 		LayoutOrder = 3,
 	}, holder)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, list)
+	bind(list, "BackgroundColor3", "Field")
+	outline(list)
 	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, list)
 
 	local items = {}
@@ -464,12 +549,15 @@ function Group:AddDropdown(id, opts)
 		return o.Value ~= nil and tostring(o.Value) or "None"
 	end
 
+	local function itemColor(name)
+		return isSelected(name) and Library.Theme.Text or Library.Theme.Muted
+	end
+
 	local function refresh()
 		headerText.Text = displayText()
 		for name, item in pairs(items) do
-			local sel = isSelected(name)
-			item.marker.Visible = sel
-			item.label.TextColor3 = sel and WHITE or MUTED
+			item.marker.Visible = isSelected(name)
+			item.label.TextColor3 = itemColor(name)
 		end
 	end
 
@@ -497,16 +585,12 @@ function Group:AddDropdown(id, opts)
 				Visible = false,
 			}, button)
 			themedGradient(marker, "pair", 90)
-			local label = new("TextLabel", {
+			local label = textLabel(button, {
 				Position = UDim2.fromOffset(10, 0),
 				Size = UDim2.new(1, -10, 1, 0),
-				BackgroundTransparency = 1,
 				Text = tostring(name),
-				Font = FONT,
-				TextSize = 13,
-				TextColor3 = MUTED,
-				TextXAlignment = LEFT,
-			}, button)
+			}, false)
+			bind(label, "TextColor3", function() return itemColor(name) end)
 			items[name] = { button = button, marker = marker, label = label }
 
 			button.MouseButton1Click:Connect(function()
@@ -571,16 +655,11 @@ function Group:AddColorPicker(id, opts)
 		BackgroundTransparency = 1,
 		LayoutOrder = nextOrder(self),
 	}, self.Container)
-	new("TextLabel", {
+	textLabel(row, {
 		Size = UDim2.new(1, -40, 1, 0),
-		BackgroundTransparency = 1,
 		Text = opts.Text or "Color",
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, row)
+	})
 	local swatch = new("TextButton", {
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, 0, 0.5, 0),
@@ -590,7 +669,7 @@ function Group:AddColorPicker(id, opts)
 		Text = "",
 		AutoButtonColor = false,
 	}, row)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, swatch)
+	outline(swatch)
 
 	function o:Set(c, silent)
 		self.Value = c
@@ -625,16 +704,11 @@ function Group:AddGradientPicker(id, opts)
 		BackgroundTransparency = 1,
 		LayoutOrder = nextOrder(self),
 	}, self.Container)
-	new("TextLabel", {
+	textLabel(row, {
 		Size = UDim2.new(1, -100, 1, 0),
-		BackgroundTransparency = 1,
 		Text = opts.Text or "Gradient",
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, row)
+	})
 
 	local function makeSwatch(x, color)
 		local sw = new("TextButton", {
@@ -646,7 +720,7 @@ function Group:AddGradientPicker(id, opts)
 			Text = "",
 			AutoButtonColor = false,
 		}, row)
-		new("UIStroke", { Color = OUTLINE, Thickness = 1 }, sw)
+		outline(sw)
 		return sw
 	end
 	local swA = makeSwatch(-74, a)
@@ -657,7 +731,7 @@ function Group:AddGradientPicker(id, opts)
 		BackgroundColor3 = WHITE,
 		BorderSizePixel = 0,
 	}, row)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, strip)
+	outline(strip)
 	local stripGrad = new("UIGradient", { Color = ColorSequence.new(a, b) }, strip)
 	local swB = makeSwatch(0, b)
 
@@ -691,31 +765,26 @@ function Group:AddKeybind(id, opts)
 		BackgroundTransparency = 1,
 		LayoutOrder = nextOrder(self),
 	}, self.Container)
-	new("TextLabel", {
+	textLabel(row, {
 		Size = UDim2.new(1, -70, 1, 0),
-		BackgroundTransparency = 1,
 		Text = opts.Text or "Keybind",
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, row)
+	})
 	local btn = new("TextButton", {
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, 0, 0.5, 0),
 		Size = UDim2.fromOffset(0, 16),
 		AutomaticSize = Enum.AutomaticSize.X,
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 		Text = "",
 		Font = FONT,
 		TextSize = 12,
-		TextColor3 = LIGHT_PINK,
 		AutoButtonColor = false,
 	}, row)
+	bind(btn, "BackgroundColor3", "Field")
+	bind(btn, "TextColor3", "Highlight")
 	new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, btn)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, btn)
+	outline(btn)
 
 	local function keyName()
 		return o.Value and o.Value.Name or "None"
@@ -776,39 +845,40 @@ function Group:AddTextbox(id, opts)
 	}, self.Container)
 	new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
 	if opts.Text then
-		new("TextLabel", {
+		textLabel(holder, {
 			Size = UDim2.new(1, 0, 0, 14),
-			BackgroundTransparency = 1,
 			Text = opts.Text,
-			Font = FONT,
-			TextSize = 13,
-			TextColor3 = TEXT,
-			TextXAlignment = LEFT,
 			LayoutOrder = 1,
-		}, holder)
+		})
 	end
+	local focused = false
 	local box = new("TextBox", {
 		Size = UDim2.new(1, 0, 0, 20),
-		BackgroundColor3 = FIELD,
 		BorderSizePixel = 0,
 		Text = tostring(o.Value),
 		PlaceholderText = opts.Placeholder or "",
-		PlaceholderColor3 = MUTED,
-		TextColor3 = TEXT,
 		Font = FONT,
 		TextSize = 13,
 		TextXAlignment = LEFT,
 		ClearTextOnFocus = false,
 		LayoutOrder = 2,
 	}, holder)
+	bind(box, "BackgroundColor3", "Field")
+	bind(box, "TextColor3", "Text")
+	bind(box, "PlaceholderColor3", "Muted")
 	new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, box)
-	local stroke = new("UIStroke", { Color = OUTLINE, Thickness = 1 }, box)
+	local stroke = new("UIStroke", { Thickness = 1 }, box)
+	bind(stroke, "Color", function()
+		return focused and Library.Theme.Accent or Library.Theme.Outline
+	end)
 
 	box.Focused:Connect(function()
+		focused = true
 		tween(stroke, 0.15, { Color = Library.Theme.Accent })
 	end)
 	box.FocusLost:Connect(function()
-		tween(stroke, 0.15, { Color = OUTLINE })
+		focused = false
+		tween(stroke, 0.15, { Color = Library.Theme.Outline })
 		if opts.Numeric then
 			local n = tonumber(box.Text)
 			if n then
@@ -846,27 +916,23 @@ function Tab:AddGroup(name, side)
 	local frame = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = PANEL,
 		BackgroundTransparency = 0.25,
 		BorderSizePixel = 0,
 		LayoutOrder = self._count[side],
 	}, self.Columns[side])
-	new("UIStroke", { Color = OUTLINE, Thickness = 1, Transparency = 0.3 }, frame)
+	bind(frame, "BackgroundColor3", "Panel")
+	outline(frame, 1, 0.3)
 	new("UIPadding", {
 		PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
 		PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
 	}, frame)
 	new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, frame)
-	local label = new("TextLabel", {
+	local label = textLabel(frame, {
 		Size = UDim2.new(1, 0, 0, 14),
-		BackgroundTransparency = 1,
 		Text = name,
-		Font = FONT,
-		TextSize = 13,
 		TextColor3 = WHITE,
-		TextXAlignment = LEFT,
 		LayoutOrder = -1,
-	}, frame)
+	}, false)
 	themedGradient(label, "pair")
 
 	return setmetatable({
@@ -899,10 +965,10 @@ function Library:Notify(text, duration)
 	local inner = new("Frame", {
 		Position = UDim2.new(1, 1, 0, 1),
 		Size = UDim2.new(1, -2, 1, -2),
-		BackgroundColor3 = PANEL,
 		BackgroundTransparency = 0.05,
 		BorderSizePixel = 0,
 	}, wrapper)
+	bind(inner, "BackgroundColor3", "Panel")
 	local stroke = new("UIStroke", { Color = WHITE, Thickness = 1 }, inner)
 	themedGradient(stroke, "loop")
 	local bar = new("Frame", {
@@ -911,17 +977,12 @@ function Library:Notify(text, duration)
 		BorderSizePixel = 0,
 	}, inner)
 	themedGradient(bar, "pair", 90)
-	new("TextLabel", {
+	textLabel(inner, {
 		Position = UDim2.fromOffset(10, 0),
 		Size = UDim2.new(1, -16, 1, -3),
-		BackgroundTransparency = 1,
 		Text = text,
-		Font = FONT,
-		TextSize = 13,
-		TextColor3 = TEXT,
 		TextWrapped = true,
-		TextXAlignment = LEFT,
-	}, inner)
+	})
 	local progress = new("Frame", {
 		AnchorPoint = Vector2.new(0, 1),
 		Position = UDim2.fromScale(0, 1),
@@ -1022,6 +1083,7 @@ function Library:Unload()
 	self._keybinds = {}
 	self._listening = nil
 	table.clear(themed)
+	table.clear(bound)
 end
 
 ----------------------------------------------------------------
@@ -1037,6 +1099,15 @@ function Library:CreateWindow(opts)
 	if opts.Snow ~= nil then self.Snow = opts.Snow end
 	if opts.Blur ~= nil then self.Blur = opts.Blur end
 	if opts.ToggleKey then self.ToggleKey = opts.ToggleKey end
+
+	-- theme can be a preset name ("Ocean"), a table of colors, or the old Accent/Accent2 options
+	if opts.Theme then
+		local th = opts.Theme
+		if type(th) == "string" then th = self.Presets[th] end
+		if type(th) == "table" then
+			for k, v in pairs(th) do self.Theme[k] = v end
+		end
+	end
 	if opts.Accent then self.Theme.Accent = opts.Accent end
 	if opts.Accent2 then self.Theme.Accent2 = opts.Accent2 end
 
@@ -1070,21 +1141,27 @@ function Library:CreateWindow(opts)
 	}, backdropGui)
 
 	local rng = Random.new()
-	local flakeColors = { WHITE, LIGHT_PINK, Color3.fromRGB(255, 140, 190), BLACK, BLACK }
+	local flakeKinds = { "white", "accent", "accent2", "black", "black" }
 	local flakes = {}
 	for i = 1, 80 do
 		local fsize = rng:NextInteger(3, 7)
-		local color = flakeColors[rng:NextInteger(1, #flakeColors)]
+		local kind = flakeKinds[rng:NextInteger(1, #flakeKinds)]
 		local frame = new("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Size = UDim2.fromOffset(fsize, fsize),
-			BackgroundColor3 = color,
 			BackgroundTransparency = rng:NextNumber(0.05, 0.35),
 			BorderSizePixel = 0,
 		}, snowGroup)
 		new("UICorner", { CornerRadius = UDim.new(1, 0) }, frame)
-		if color == BLACK then
+		if kind == "white" then
+			frame.BackgroundColor3 = WHITE
+		elseif kind == "black" then
+			frame.BackgroundColor3 = BLACK
 			new("UIStroke", { Color = WHITE, Thickness = 1, Transparency = 0.65 }, frame)
+		elseif kind == "accent" then
+			bind(frame, "BackgroundColor3", "Accent")
+		else
+			bind(frame, "BackgroundColor3", "Accent2")
 		end
 		flakes[i] = {
 			frame = frame,
@@ -1154,16 +1231,13 @@ function Library:CreateWindow(opts)
 		BackgroundTransparency = 1,
 		Active = true,
 	}, window)
-	local title = new("TextLabel", {
+	local title = textLabel(titleBar, {
 		Position = UDim2.fromOffset(10, 0),
 		Size = UDim2.new(1, -20, 1, 0),
-		BackgroundTransparency = 1,
 		Text = opts.Title or "pink ui",
-		Font = FONT,
 		TextSize = 15,
 		TextColor3 = WHITE,
-		TextXAlignment = LEFT,
-	}, titleBar)
+	}, false)
 	themedGradient(title, "pair")
 
 	local accent = new("Frame", {
@@ -1194,15 +1268,13 @@ function Library:CreateWindow(opts)
 		ClipsDescendants = true,
 	}, window)
 
-	local footer = new("TextLabel", {
+	local footer = textLabel(window, {
 		Position = UDim2.new(0, 0, 1, -22),
 		Size = UDim2.new(1, 0, 0, 22),
-		BackgroundTransparency = 1,
 		Text = "",
-		Font = FONT,
 		TextSize = 11,
-		TextColor3 = MUTED,
-	}, window)
+		TextXAlignment = Enum.TextXAlignment.Center,
+	}, "Muted")
 
 	function Window:SetFooter(text)
 		self._footerText = text
@@ -1213,6 +1285,7 @@ function Library:CreateWindow(opts)
 	Window:SetFooter(opts.Footer)
 
 	-- resize grip (bottom-right corner)
+	local gripHot = false
 	local grip = new("TextButton", {
 		AnchorPoint = Vector2.new(1, 1),
 		Position = UDim2.new(1, -2, 1, -2),
@@ -1222,17 +1295,22 @@ function Library:CreateWindow(opts)
 		AutoButtonColor = false,
 	}, window)
 	local gripDots = {}
+	local function gripColor()
+		return gripHot and Library.Theme.Accent or Library.Theme.Muted
+	end
 	for _, p in ipairs({ { 13, 13 }, { 9, 13 }, { 13, 9 }, { 5, 13 }, { 9, 9 }, { 13, 5 } }) do
-		table.insert(gripDots, new("Frame", {
+		local dot = new("Frame", {
 			Position = UDim2.fromOffset(p[1], p[2]),
 			Size = UDim2.fromOffset(2, 2),
-			BackgroundColor3 = MUTED,
 			BorderSizePixel = 0,
-		}, grip))
+		}, grip)
+		bind(dot, "BackgroundColor3", gripColor)
+		table.insert(gripDots, dot)
 	end
-	local function tintGrip(color)
+	local function setGripHot(state)
+		gripHot = state
 		for _, d in ipairs(gripDots) do
-			tween(d, 0.15, { BackgroundColor3 = color })
+			tween(d, 0.15, { BackgroundColor3 = gripColor() })
 		end
 	end
 
@@ -1242,7 +1320,7 @@ function Library:CreateWindow(opts)
 	local pickerCatcher = new("TextButton", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = BLACK,
-		BackgroundTransparency = 0.45,
+		BackgroundTransparency = 0.65,
 		BorderSizePixel = 0,
 		Text = "",
 		AutoButtonColor = false,
@@ -1252,23 +1330,19 @@ function Library:CreateWindow(opts)
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
 		Size = UDim2.fromOffset(204, 184),
-		BackgroundColor3 = Color3.fromRGB(16, 13, 17),
 		BorderSizePixel = 0,
 		Visible = false,
 	}, window)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, pickerFrame)
+	bind(pickerFrame, "BackgroundColor3", "Panel")
+	outline(pickerFrame)
 
-	local pickerTitle = new("TextLabel", {
+	local pickerTitle = textLabel(pickerFrame, {
 		Position = UDim2.fromOffset(8, 4),
 		Size = UDim2.new(1, -34, 0, 18),
-		BackgroundTransparency = 1,
 		Text = "color",
-		Font = FONT,
-		TextSize = 13,
 		TextColor3 = WHITE,
-		TextXAlignment = LEFT,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, pickerFrame)
+	}, false)
 	themedGradient(pickerTitle, "pair")
 	local pickerClose = new("TextButton", {
 		AnchorPoint = Vector2.new(1, 0),
@@ -1278,8 +1352,8 @@ function Library:CreateWindow(opts)
 		Text = "x",
 		Font = FONT,
 		TextSize = 14,
-		TextColor3 = MUTED,
 	}, pickerFrame)
+	bind(pickerClose, "TextColor3", "Muted")
 
 	local svBox = new("Frame", {
 		Position = UDim2.fromOffset(8, 26),
@@ -1287,7 +1361,7 @@ function Library:CreateWindow(opts)
 		BackgroundColor3 = Color3.fromHSV(0, 1, 1),
 		BorderSizePixel = 0,
 	}, pickerFrame)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, svBox)
+	outline(svBox)
 	local satLayer = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0 }, svBox)
 	new("UIGradient", { Transparency = NumberSequence.new(0, 1) }, satLayer)
 	local valLayer = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BorderSizePixel = 0 }, svBox)
@@ -1309,7 +1383,7 @@ function Library:CreateWindow(opts)
 		BackgroundColor3 = WHITE,
 		BorderSizePixel = 0,
 	}, pickerFrame)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, hueBar)
+	outline(hueBar)
 	do
 		local keys = {}
 		for i = 0, 6 do
@@ -1333,17 +1407,22 @@ function Library:CreateWindow(opts)
 		BackgroundColor3 = WHITE,
 		BorderSizePixel = 0,
 	}, pickerFrame)
-	new("UIStroke", { Color = OUTLINE, Thickness = 1 }, pickerPreview)
-	local pickerHex = new("TextLabel", {
+	outline(pickerPreview)
+	-- hex box: type a color like #FF8CBE and press enter
+	local pickerHex = new("TextBox", {
 		Position = UDim2.fromOffset(38, 152),
 		Size = UDim2.new(1, -46, 0, 22),
-		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
 		Text = "#FFFFFF",
 		Font = FONT,
 		TextSize = 13,
-		TextColor3 = TEXT,
 		TextXAlignment = LEFT,
+		ClearTextOnFocus = false,
 	}, pickerFrame)
+	bind(pickerHex, "BackgroundColor3", "Field")
+	bind(pickerHex, "TextColor3", "Text")
+	new("UIPadding", { PaddingLeft = UDim.new(0, 6) }, pickerHex)
+	outline(pickerHex)
 
 	local pickerOnChange = nil
 	local ph, ps, pv = 0, 1, 1
@@ -1381,6 +1460,18 @@ function Library:CreateWindow(opts)
 		pickerCatcher.Visible = true
 		pickerFrame.Visible = true
 	end
+
+	pickerHex.FocusLost:Connect(function()
+		local hex = (pickerHex.Text:gsub("[^%x]", ""))
+		local n = (#hex == 6) and tonumber(hex, 16) or nil
+		if n and pickerOnChange then
+			local color = Color3.fromRGB(bit32.rshift(n, 16), bit32.band(bit32.rshift(n, 8), 255), bit32.band(n, 255))
+			ph, ps, pv = color:ToHSV()
+			pickerCommit()
+		else
+			pickerVisuals()
+		end
+	end)
 
 	pickerCatcher.MouseButton1Click:Connect(closePicker)
 	pickerClose.MouseButton1Click:Connect(closePicker)
@@ -1432,12 +1523,12 @@ function Library:CreateWindow(opts)
 			resizing = true
 			resizeStart = Vector2.new(input.Position.X, input.Position.Y)
 			resizeBase = root.AbsoluteSize
-			tintGrip(Library.Theme.Accent)
+			setGripHot(true)
 		end
 	end)
-	connect(grip.MouseEnter, function() tintGrip(Library.Theme.Accent) end)
+	connect(grip.MouseEnter, function() setGripHot(true) end)
 	connect(grip.MouseLeave, function()
-		if not resizing then tintGrip(MUTED) end
+		if not resizing then setGripHot(false) end
 	end)
 
 	connect(UserInputService.InputChanged, function(input)
@@ -1472,7 +1563,7 @@ function Library:CreateWindow(opts)
 			dragging, svDrag, hueDrag = false, false, false
 			if resizing then
 				resizing = false
-				tintGrip(MUTED)
+				setGripHot(false)
 			end
 		end
 	end)
@@ -1480,12 +1571,16 @@ function Library:CreateWindow(opts)
 	------------------------------------------------------------
 	-- tabs
 	------------------------------------------------------------
+	local function tabColor(tab)
+		return tab.Selected and Library.Theme.Text or Library.Theme.Muted
+	end
+
 	local function selectTab(tab)
 		for _, tb in ipairs(Window._tabs) do
-			local on = (tb == tab)
-			tb.Page.Visible = on
-			tb.Underline.Visible = on
-			tween(tb.Button, 0.15, { TextColor3 = on and WHITE or MUTED })
+			tb.Selected = (tb == tab)
+			tb.Page.Visible = tb.Selected
+			tb.Underline.Visible = tb.Selected
+			tween(tb.Button, 0.15, { TextColor3 = tabColor(tb) })
 		end
 	end
 
@@ -1497,7 +1592,6 @@ function Library:CreateWindow(opts)
 			Text = name,
 			Font = FONT,
 			TextSize = 13,
-			TextColor3 = MUTED,
 			AutoButtonColor = false,
 			LayoutOrder = #self._tabs + 1,
 		}, tabBar)
@@ -1526,10 +1620,10 @@ function Library:CreateWindow(opts)
 				BackgroundTransparency = 1,
 				BorderSizePixel = 0,
 				ScrollBarThickness = 2,
-				ScrollBarImageColor3 = Library.Theme.Accent,
 				AutomaticCanvasSize = Enum.AutomaticSize.Y,
 				CanvasSize = UDim2.new(),
 			}, page)
+			bind(col, "ScrollBarImageColor3", "Accent")
 			new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, col)
 			new("UIPadding", {
 				PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
@@ -1545,8 +1639,10 @@ function Library:CreateWindow(opts)
 			Underline = underline,
 			Page = page,
 			Columns = columns,
+			Selected = false,
 			_count = { Left = 0, Right = 0 },
 		}, Tab)
+		bind(btn, "TextColor3", function() return tabColor(tab) end)
 		table.insert(self._tabs, tab)
 
 		btn.MouseButton1Click:Connect(function() selectTab(tab) end)
@@ -1554,10 +1650,11 @@ function Library:CreateWindow(opts)
 		return tab
 	end
 
-	-- ready-made settings tab: menu key, snow, blur, spin, accent gradient, unload
+	-- ready-made settings tab: menu options + full theme editor + unload
 	function Window:AddSettingsTab(name)
 		local tab = self:AddTab(name or "Settings")
 
+		-- left column: menu
 		local menu = tab:AddGroup("Menu", "Left")
 		menu:AddToggle("PinkUI_Snow", {
 			Text = "Snow", Default = Library.Snow,
@@ -1582,13 +1679,74 @@ function Library:CreateWindow(opts)
 		})
 		menu:AddButton({ Text = "Unload UI", Callback = function() Library:Unload() end })
 
-		local theme = tab:AddGroup("Theme", "Right")
-		theme:AddGradientPicker("PinkUI_Accent", {
+		-- right column: theme editor
+		local themeOpts = {}
+		local singleKeys = {
+			{ "Panel", "Panels" },
+			{ "Field", "Fields / buttons" },
+			{ "Outline", "Outlines" },
+			{ "Text", "Text" },
+			{ "Muted", "Muted text" },
+			{ "Highlight", "Values / keys" },
+		}
+
+		local function syncThemeOptions()
+			local th = Library.Theme
+			themeOpts.Accent:Set(th.Accent, th.Accent2, true)
+			themeOpts.Background:Set(th.Background, th.BackgroundEnd, true)
+			for _, entry in ipairs(singleKeys) do
+				themeOpts[entry[1]]:Set(th[entry[1]], true)
+			end
+		end
+
+		local themeGroup = tab:AddGroup("Theme", "Right")
+		local presetNames = {}
+		for presetName in pairs(Library.Presets) do table.insert(presetNames, presetName) end
+		table.sort(presetNames)
+		themeGroup:AddDropdown("PinkUI_Preset", {
+			Text = "Preset",
+			Values = presetNames,
+			Callback = function(presetName)
+				if Library.Presets[presetName] then
+					Library:SetTheme(Library.Presets[presetName])
+					syncThemeOptions()
+				end
+			end,
+		})
+		themeOpts.Accent = themeGroup:AddGradientPicker("PinkUI_Accent", {
 			Text = "Accent gradient",
 			Default = { Library.Theme.Accent, Library.Theme.Accent2 },
 			Callback = function(a, b) Library:SetTheme({ Accent = a, Accent2 = b }) end,
 		})
-		theme:AddLabel("Drag the title bar to move the window and the bottom-right corner to resize it.")
+		themeOpts.Background = themeGroup:AddGradientPicker("PinkUI_Background", {
+			Text = "Window gradient",
+			Default = { Library.Theme.Background, Library.Theme.BackgroundEnd },
+			Callback = function(a, b) Library:SetTheme({ Background = a, BackgroundEnd = b }) end,
+		})
+
+		local colors = tab:AddGroup("Colors", "Right")
+		for _, entry in ipairs(singleKeys) do
+			local key = entry[1]
+			themeOpts[key] = colors:AddColorPicker("PinkUI_" .. key, {
+				Text = entry[2],
+				Default = Library.Theme[key],
+				Callback = function(c) Library:SetTheme({ [key] = c }) end,
+			})
+		end
+		colors:AddButton({
+			Text = "Reset theme",
+			Callback = function()
+				Library:SetTheme(Library.Defaults)
+				syncThemeOptions()
+			end,
+		})
+		colors:AddButton({
+			Text = "Print theme to output",
+			Callback = function()
+				print(Library:ExportTheme())
+				Library:Notify("Theme printed to the output window", 3)
+			end,
+		})
 		return tab
 	end
 
@@ -1670,7 +1828,7 @@ function Library:CreateWindow(opts)
 		closePicker = closePicker,
 		stopInteractions = function()
 			dragging, resizing, svDrag, hueDrag = false, false, false, false
-			tintGrip(MUTED)
+			setGripHot(false)
 		end,
 	}
 	self.Window = Window
